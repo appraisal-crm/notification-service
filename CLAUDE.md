@@ -127,7 +127,8 @@ notification-service/
 ## Commands
 
 ```bash
-# Start infrastructure (compose lives in the request-service repo root)
+# Start shared infra (Kafka/Keycloak) once, then this service's data infra
+docker compose -f ../infra/docker-compose.yml up -d
 docker compose up -d
 
 # Run the service (DATABASE_URL required — see .env.example)
