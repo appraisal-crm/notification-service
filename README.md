@@ -1,1 +1,59 @@
 # notification-service
+
+Consumes domain events from Kafka and delivers notifications to recipients over
+email, SMS, in-app and push channels. Part of the Appraisal CRM (Database-per-Service).
+
+Status: **database layer only** — schema, domain model and repository are in place;
+the Kafka consumer, channel senders and HTTP API are added on top of this in the next steps.
+
+## Project docs
+
+Project-wide docs live in the reference repo [`request-service`](https://github.com/appraisal-crm/request-service) (single source of truth — not duplicated here):
+
+- [Architecture (C4 / Structurizr)](https://github.com/appraisal-crm/request-service/tree/main/docs/architecture)
+- [ADRs](https://github.com/appraisal-crm/request-service/tree/main/docs/adr) — Kafka, Keycloak, database-per-service, event delivery / outbox, …
+- [Business requirements (BRD)](https://github.com/appraisal-crm/request-service/tree/main/docs/brd)
+
+Service-specific docs (onboarding, QA) get added here once the consumer and HTTP API land.
+
+## Layout
+
+```
+cmd/server/main.go     # entry point: connects DB, health server, graceful shutdown
+config/                # ENV config (os.Getenv only)
+internal/
+  domain/              # Notification entity, channels, statuses, domain errors
+  repository/          # NotificationRepository interface + PostgreSQL implementation
+migrations/            # golang-migrate SQL (up/down)
+```
+
+## Schema
+
+- `notifications` — one queued/dispatched message per recipient per channel
+- `notification_channels` / `notification_statuses` — lookup tables (FK from `notifications`)
+
+Consumer idempotency (dedup by `event_id`) is handled in Redis (`SET NX EX`), not in the DB.
+
+## ENV
+
+| Var            | Required | Default | Description                          |
+|----------------|----------|---------|--------------------------------------|
+| `DATABASE_URL` | yes      | —       | PostgreSQL DSN (`notification_db`)   |
+| `SERVER_PORT`  | no       | `8083`  | HTTP port (currently `/health` only) |
+
+## Run
+
+```bash
+# this service's own data infra (Postgres + Redis); auto-creates notification_db
+docker compose up -d
+# shared Kafka/Keycloak live in ../infra (bring that up separately when needed)
+make migrate-up              # apply migrations
+make run                     # DATABASE_URL must be set (see .env.example)
+```
+
+## Migrations
+
+```bash
+make migrate-up      # apply all
+make migrate-down    # roll back one
+```

@@ -1,0 +1,12 @@
+.git
+.github
+.claude
+.env
+.env.*
+docs
+i18n
+infra
+scripts
+Dockerfile
+docker-compose.yml
+*.md
