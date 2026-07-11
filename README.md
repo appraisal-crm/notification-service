@@ -6,6 +6,16 @@ email, SMS, in-app and push channels. Part of the Appraisal CRM (Database-per-Se
 Status: **database layer only** — schema, domain model and repository are in place;
 the Kafka consumer, channel senders and HTTP API are added on top of this in the next steps.
 
+## Project docs
+
+Project-wide docs live in the reference repo [`request-service`](https://github.com/appraisal-crm/request-service) (single source of truth — not duplicated here):
+
+- [Architecture (C4 / Structurizr)](https://github.com/appraisal-crm/request-service/tree/main/docs/architecture)
+- [ADRs](https://github.com/appraisal-crm/request-service/tree/main/docs/adr) — Kafka, Keycloak, database-per-service, event delivery / outbox, …
+- [Business requirements (BRD)](https://github.com/appraisal-crm/request-service/tree/main/docs/brd)
+
+Service-specific docs (onboarding, QA) get added here once the consumer and HTTP API land.
+
 ## Layout
 
 ```
