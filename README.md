@@ -34,8 +34,9 @@ Consumer idempotency (dedup by `event_id`) is handled in Redis (`SET NX EX`), no
 ## Run
 
 ```bash
-# infra (Postgres) runs from the request-service compose at the repo root
-createdb notification_db     # once, if not provisioned by infra/postgres/init
+# this service's own data infra (Postgres + Redis); auto-creates notification_db
+docker compose up -d
+# shared Kafka/Keycloak live in ../infra (bring that up separately when needed)
 make migrate-up              # apply migrations
 make run                     # DATABASE_URL must be set (see .env.example)
 ```

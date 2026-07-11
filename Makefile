@@ -1,5 +1,5 @@
 MIGRATE := migrate
-DB_URL  ?= postgres://appraisal:appraisal@localhost:5433/notification_db?sslmode=disable
+DB_URL  ?= postgres://appraisal:appraisal@localhost:5434/notification_db?sslmode=disable
 
 .PHONY: build run test migrate-up migrate-down
 
