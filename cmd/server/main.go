@@ -8,12 +8,21 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/MicahParks/keyfunc/v3"
 	"github.com/appraisal-crm/notification-service/config"
+	"github.com/appraisal-crm/notification-service/internal/dedup"
+	"github.com/appraisal-crm/notification-service/internal/handler"
+	"github.com/appraisal-crm/notification-service/internal/kafka"
 	"github.com/appraisal-crm/notification-service/internal/repository"
+	"github.com/appraisal-crm/notification-service/internal/sender"
+	"github.com/appraisal-crm/notification-service/internal/service"
+	"github.com/appraisal-crm/notification-service/internal/templates"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -35,22 +44,49 @@ func main() {
 	}
 	slog.Info("connected to database")
 
-	// Repository is ready; the Kafka consumer and HTTP handlers are wired in the next step.
-	_ = repository.NewPostgresRepository(db)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		if err := db.Ping(r.Context()); err != nil {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     cfg.RedisAddr,
+		Password: cfg.RedisPassword,
 	})
+	defer rdb.Close()
+	if err := rdb.Ping(context.Background()).Err(); err != nil {
+		slog.Warn("redis is not reachable — dedup might fail", "error", err)
+	} else {
+		slog.Info("connected to redis", "addr", cfg.RedisAddr)
+	}
+
+	jwks, err := keyfunc.NewDefault([]string{cfg.JWKSUrl})
+	if err != nil {
+		slog.Error("failed to initialize JWKS", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("JWKS initialized", "url", cfg.JWKSUrl)
+
+	renderer, err := templates.NewRenderer()
+	if err != nil {
+		slog.Error("failed to initialize template renderer", "error", err)
+		os.Exit(1)
+	}
+
+	emailSender := sender.NewSMTPSender(
+		cfg.SMTPHost,
+		cfg.SMTPPort,
+		cfg.SMTPUser,
+		cfg.SMTPPassword,
+		cfg.SMTPFrom,
+		cfg.SMTPEnabled,
+	)
+
+	repo := repository.NewPostgresRepository(db)
+	svc := service.NewNotificationService(repo, emailSender, renderer, cfg.ClientPortalURL, cfg.OfficePortalURL)
+
+	allowedOrigins := strings.Split(cfg.AllowedOrigins, ",")
+	router := handler.NewRouter(svc, db, jwks, allowedOrigins)
 
 	addr := fmt.Sprintf(":%s", cfg.ServerPort)
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           mux,
+		Handler:           router,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -60,9 +96,48 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	brokers := strings.Split(cfg.KafkaBrokers, ",")
+	deduplicator := dedup.New(rdb, cfg.DedupTTL)
+
+	// 1. Request events consumer (request.created, request.status_changed)
+	requestConsumer := kafka.NewConsumer(brokers, cfg.KafkaConsumerGroup, cfg.KafkaRequestTopic, deduplicator, svc)
+	defer requestConsumer.Close()
+	requestConsumerDone := make(chan struct{})
+	go func() {
+		if err := requestConsumer.Run(ctx); err != nil && ctx.Err() == nil {
+			slog.Error("request consumer failed", "error", err)
+		}
+		close(requestConsumerDone)
+	}()
+	slog.Info("request event consumer started", "topic", cfg.KafkaRequestTopic, "group", cfg.KafkaConsumerGroup)
+
+	// 2. Inspect events consumer (inspect.completed)
+	inspectConsumer := kafka.NewConsumer(brokers, cfg.KafkaConsumerGroup, cfg.KafkaInspectTopic, deduplicator, svc)
+	defer inspectConsumer.Close()
+	inspectConsumerDone := make(chan struct{})
+	go func() {
+		if err := inspectConsumer.Run(ctx); err != nil && ctx.Err() == nil {
+			slog.Error("inspect consumer failed", "error", err)
+		}
+		close(inspectConsumerDone)
+	}()
+	slog.Info("inspect event consumer started", "topic", cfg.KafkaInspectTopic, "group", cfg.KafkaConsumerGroup)
+
+	// 3. Review events consumer (report.ready)
+	reviewConsumer := kafka.NewConsumer(brokers, cfg.KafkaConsumerGroup, cfg.KafkaReviewTopic, deduplicator, svc)
+	defer reviewConsumer.Close()
+	reviewConsumerDone := make(chan struct{})
+	go func() {
+		if err := reviewConsumer.Run(ctx); err != nil && ctx.Err() == nil {
+			slog.Error("review consumer failed", "error", err)
+		}
+		close(reviewConsumerDone)
+	}()
+	slog.Info("review event consumer started", "topic", cfg.KafkaReviewTopic, "group", cfg.KafkaConsumerGroup)
+
 	errCh := make(chan error, 1)
 	go func() {
-		slog.Info("starting server", "addr", addr)
+		slog.Info("starting notification-service server", "addr", addr)
 		errCh <- srv.ListenAndServe()
 	}()
 
@@ -74,14 +149,24 @@ func main() {
 		slog.Info("shutdown signal received")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			slog.Error("graceful shutdown failed", "error", err)
 			os.Exit(1)
 		}
+
 		if err := <-errCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server error", "error", err)
 			os.Exit(1)
 		}
-		slog.Info("server stopped")
+
+		<-requestConsumerDone
+		slog.Info("request consumer stopped")
+		<-inspectConsumerDone
+		slog.Info("inspect consumer stopped")
+		<-reviewConsumerDone
+		slog.Info("review consumer stopped")
+
+		slog.Info("notification-service stopped successfully")
 	}
 }
