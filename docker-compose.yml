@@ -61,6 +61,13 @@ services:
       KAFKA_BROKERS: kafka:9092
       REDIS_ADDR: redis:6379
       REDIS_PASSWORD: ${REDIS_PASSWORD:-appraisal}
+      SMTP_HOST: mailpit
+      SMTP_PORT: 1025
+      SMTP_FROM: noreply@appraisal-crm.ru
+      SMTP_ENABLED: "true"
+      JWKS_URL: http://keycloak:8080/realms/appraisal/protocol/openid-connect/certs
+      CLIENT_PORTAL_URL: http://localhost:5173
+      OFFICE_PORTAL_URL: http://localhost:5174
     ports:
       - "8083:8083"
     # own project network (reaches postgres/redis) + shared bus (kafka)
